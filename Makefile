@@ -74,7 +74,13 @@ valgrind: $(BIN_EDITOR)
 	@printf 'o pruebas_editor/vg.txt\na linea uno\na linea dos\np\nd 1\np\nq\n' | \
 	 valgrind --leak-check=full --show-leak-kinds=all ./$(BIN_EDITOR) -q > /dev/null
 
+# Archivos de demostracion que la guia de verificacion pide crear a mano en la
+# raiz del proyecto. Se listan uno por uno, en lugar de usar un comodin como
+# *.txt, para no borrar por accidente ningun archivo del usuario.
+DEMO_FILES = demo.txt desde_shell.txt verif.txt prueba_trunc.txt prueba_nl.txt
+
 clean:
 	rm -rf $(BIN_DIR) $(OBJ_DIR) pruebas_editor
+	rm -f $(DEMO_FILES)
 
 .PHONY: all editor run test valgrind clean
