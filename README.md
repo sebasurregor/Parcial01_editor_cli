@@ -165,11 +165,44 @@ no aplica en ese entorno.
 
 ---
 
-## Nota sobre `m_info`
+## Cobertura total de la restricción de E/S
 
-El comando `m_info` de `cat_memoria.c`, que forma parte del shell original, lee
-`/proc/self/status` con `fopen`/`fgets`/`fclose`. La restricción del taller
-apunta al archivo de texto que manipula el editor, de modo que ese código no la
-infringe en sentido estricto. Se deja documentado por transparencia: si el
-criterio se extendiera a todo el entregable, sería el único punto a convertir a
-`open`/`read`/`close`.
+En el shell original, el comando `m_info` de `cat_memoria.c` leía
+`/proc/self/status` con `fopen`/`fgets`/`fclose`. Aunque la restricción del
+taller apunta al archivo de texto que manipula el editor, ese comando se
+convirtió a `open(2)`, `read(2)` y `close(2)` para que **ningún punto del
+entregable** use la biblioteca estándar de C con fines de acceso a archivos.
+
+Comprobación:
+
+```bash
+grep -rn "fopen\|fread\|fwrite\|fclose" src/ include/
+```
+
+No devuelve ninguna coincidencia en código; las únicas apariciones de `fgets`
+son sobre `stdin`, que el enunciado permite de forma expresa por tratarse de
+diálogo por consola.
+
+La conversión obligó a reimplementar a mano lo que `fgets` hacía por nosotros:
+
+- **Bucle de lectura hasta EOF.** Los archivos de `/proc` los genera el kernel al
+  vuelo, de modo que `stat(2)` informa un tamaño de 0 bytes y no se puede
+  reservar el bloque exacto de antemano. Hay que leer hasta que `read(2)`
+  devuelva 0.
+- **Manejo de lecturas parciales y de `EINTR`**, con los mismos criterios que el
+  editor.
+- **Troceado en líneas con `memchr(3)`**, que opera sobre memoria ya leída y no
+  sobre el archivo.
+
+La traza que produce el comando deja ver el mecanismo con claridad:
+
+```
+[syscall] open("/proc/self/status", O_RDONLY) ... = 3
+[syscall] read(3, buffer+0, 1024) ... = 1024
+[syscall] read(3, buffer+1024, 1024) ... = 383     <- lectura parcial
+[syscall] read(3, buffer+1407, 1024) ... = 0       <- fin de archivo
+[syscall] close(3) ... = 0
+```
+
+Esa lectura de 383 bytes es justamente el caso que un `read` único sin bucle
+habría truncado en silencio.

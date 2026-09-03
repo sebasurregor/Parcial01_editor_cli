@@ -63,7 +63,7 @@ Command commands[] = {
         "m_info", "memoria", 
         "m_info", 
         "Muestra el estado del mapa de memoria del proceso actual.",
-        "Lectura directa de /proc/self/status", 
+        "open(2), read(2), close(2) sobre /proc/self/status", 
         cmd_m_info
     },
 

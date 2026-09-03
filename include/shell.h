@@ -79,7 +79,7 @@ int cmd_d_copy(int argc, char **argv);   /* Syscalls: open, read, write, close *
 /* --- Categoría: Memoria (cat_memoria.c) --- */
 int cmd_m_sbrk(int argc, char **argv);   /* Syscalls: sbrk / brk */
 int cmd_m_mmap(int argc, char **argv);   /* Syscalls: mmap, munmap */
-int cmd_m_info(int argc, char **argv);   /* Mecanismo: Lectura de /proc/self/status */
+int cmd_m_info(int argc, char **argv);   /* Syscalls: open, read, close (sobre /proc/self/status) */
 
 /* --- Categoría: Monitoreo/Procesos (cat_monitoreo.c) --- */
 int cmd_p_fork(int argc, char **argv);    /* Syscalls: fork, getpid, getppid, waitpid */

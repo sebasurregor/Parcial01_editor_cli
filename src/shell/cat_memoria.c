@@ -1,9 +1,11 @@
 #include "shell.h"
-#include <unistd.h>
-#include <sys/mman.h>
-#include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <unistd.h>     /* read, close, sbrk                                    */
+#include <fcntl.h>      /* open, O_RDONLY                                       */
+#include <sys/mman.h>   /* mmap, munmap                                         */
+#include <errno.h>      /* errno                                                */
+#include <string.h>     /* memchr, strncmp, strerror                            */
+#include <stdio.h>      /* printf: SOLO para la salida por consola, nunca para  */
+#include <stdlib.h>     /* acceder a archivos (malloc, realloc, free)           */
 
 /**
  * ====================================================================================
@@ -135,43 +137,185 @@ int cmd_m_mmap(int argc, char **argv) {
 
 /**
  * ====================================================================================
+ * LECTOR DE ARCHIVOS VIRTUALES DEL KERNEL (solo llamadas al sistema)
+ * ====================================================================================
+ * Lee por completo un archivo del sistema de ficheros virtual /proc usando
+ * exclusivamente open(2), read(2) y close(2). Devuelve un bloque de memoria
+ * dinamica terminado en '\0' que quien llama debe liberar con free().
+ *
+ * Por que hace falta un bucle de lectura y no basta con un solo read():
+ *
+ *   1. Los archivos de /proc no existen en disco: el kernel los genera al
+ *      vuelo. Por eso stat(2) informa un tamano de 0 bytes y no se puede
+ *      reservar de antemano el bloque exacto; hay que leer hasta que read(2)
+ *      devuelva 0, que es la senal de fin de archivo.
+ *   2. read(2) puede devolver MENOS bytes de los solicitados sin que eso sea un
+ *      error, y puede ser interrumpida por una senal retornando -1 con
+ *      errno == EINTR. Ambos casos se manejan aqui.
+ *
+ * Este es exactamente el trabajo que fgets(3) hacia por nosotros a cambio de
+ * ocultar el mecanismo; hacerlo a mano es el objetivo pedagogico del ejercicio.
+ */
+#define BLOQUE_LECTURA 1024
+
+static char *proc_leer_completo(const char *ruta, size_t *longitud)
+{
+    /* 1. LLAMADA AL SISTEMA: open */
+    LOG_SYSCALL("open", "\"%s\", O_RDONLY", ruta);
+    int fd = open(ruta, O_RDONLY);
+    if (fd == -1) {
+        int guardado = errno;
+        LOG_SYSCALL_ERROR(strerror(errno));
+        errno = guardado;
+        perror("m_info: open");
+        return NULL;
+    }
+    LOG_SYSCALL_RESULT(fd);
+
+    size_t capacidad = BLOQUE_LECTURA * 2;
+    size_t usados    = 0;
+    char  *buffer    = malloc(capacidad);
+    if (buffer == NULL) {
+        perror("m_info: malloc");
+        close(fd);
+        return NULL;
+    }
+
+    /* 2. LLAMADA AL SISTEMA: read (en bucle hasta el fin de archivo) */
+    for (;;) {
+        /* Se reserva siempre un byte extra para el '\0' terminador */
+        while (capacidad - usados < BLOQUE_LECTURA + 1) {
+            size_t nueva = capacidad * 2;
+            char  *tmp   = realloc(buffer, nueva);
+            /* Se asigna a una variable temporal: si realloc falla devuelve NULL
+             * y asignarlo directo a 'buffer' perderia el bloque anterior. */
+            if (tmp == NULL) {
+                perror("m_info: realloc");
+                free(buffer);
+                close(fd);
+                return NULL;
+            }
+            buffer    = tmp;
+            capacidad = nueva;
+        }
+
+        LOG_SYSCALL("read", "%d, buffer+%zu, %d", fd, usados, BLOQUE_LECTURA);
+        ssize_t leidos = read(fd, buffer + usados, BLOQUE_LECTURA);
+
+        if (leidos == -1) {
+            if (errno == EINTR) {   /* interrumpida por una senal: reintentar */
+                printf("= " COLOR_ERROR "EINTR" COLOR_RESET " (reintentando)\n");
+                continue;
+            }
+            int guardado = errno;
+            LOG_SYSCALL_ERROR(strerror(errno));
+            errno = guardado;
+            perror("m_info: read");
+            free(buffer);
+            close(fd);
+            return NULL;
+        }
+        LOG_SYSCALL_RESULT(leidos);
+
+        if (leidos == 0) break;              /* fin de archivo alcanzado */
+        usados += (size_t)leidos;
+    }
+
+    buffer[usados] = '\0';
+
+    /* 3. LLAMADA AL SISTEMA: close */
+    LOG_SYSCALL("close", "%d", fd);
+    if (close(fd) == -1) {
+        int guardado = errno;
+        LOG_SYSCALL_ERROR(strerror(errno));
+        errno = guardado;
+        perror("m_info: close");
+    } else {
+        LOG_SYSCALL_RESULT(0);
+    }
+
+    if (longitud) *longitud = usados;
+    return buffer;
+}
+
+/* Indica si una linea de /proc/self/status es una de las estadisticas de
+ * memoria que nos interesa mostrar. Recibe la longitud explicita porque la
+ * linea NO esta terminada en '\0': es una porcion del bloque leido. */
+static int es_linea_de_interes(const char *linea, size_t largo)
+{
+    static const char *claves[] = {
+        "VmPeak:",  /* Pico de memoria virtual ocupada                          */
+        "VmSize:",  /* Memoria virtual total asignada                           */
+        "VmLck:",   /* Paginas bloqueadas fisicamente en RAM (mlock)            */
+        "VmHWM:",   /* Pico de memoria fisica residente (High Water Mark)       */
+        "VmRSS:",   /* Memoria fisica residente actualmente ocupada en RAM      */
+        "VmData:",  /* Tamano del segmento de datos (heap)                      */
+        "VmStk:",   /* Tamano del segmento de pila (stack)                      */
+        "VmExe:",   /* Tamano del segmento de codigo de texto                   */
+        "VmLib:",   /* Memoria de las librerias compartidas asociadas           */
+        "VmPTE:"    /* Tamano de las tablas de paginas de traduccion            */
+    };
+    const size_t total = sizeof(claves) / sizeof(claves[0]);
+
+    for (size_t i = 0; i < total; i++) {
+        size_t n = strlen(claves[i]);
+        if (largo >= n && strncmp(linea, claves[i], n) == 0) return 1;
+    }
+    return 0;
+}
+
+/**
+ * ====================================================================================
  * COMANDO: m_info
  * ====================================================================================
- * Lee estadísticas del estado del mapa de memoria del proceso.
- * 
- * Explicación teórica:
- * El sistema de archivos virtual /proc en Linux expone información del kernel como ficheros.
- * `/proc/self/status` expone información detallada de estado del proceso actual (self).
- * Leer este archivo lee dinámicamente metadatos del espacio de direcciones del kernel.
+ * Lee estadisticas del estado del mapa de memoria del proceso.
+ *
+ * Explicacion teorica:
+ * El sistema de archivos virtual /proc en Linux expone informacion del kernel como
+ * si fueran ficheros. `/proc/self/status` describe el estado del proceso actual
+ * (self). Leerlo consulta dinamicamente los metadatos del espacio de direcciones.
+ *
+ * Syscalls explicadas:
+ * 1. open(2):  abre el archivo virtual generado por el kernel.
+ * 2. read(2):  copia los bytes generados al vuelo hacia un bufer en RAM.
+ * 3. close(2): libera la entrada en la tabla de descriptores del proceso.
+ *
+ * Nota sobre la restriccion de E/S del taller: este comando NO usa fopen, fgets
+ * ni fclose. El troceado en lineas, que antes hacia fgets(3), se realiza aqui a
+ * mano recorriendo el bufer con memchr(3), que opera sobre memoria ya leida y no
+ * sobre el archivo.
  */
 int cmd_m_info(int argc, char **argv) {
     (void)argc;
     (void)argv;
-    FILE *f = fopen("/proc/self/status", "r");
-    if (!f) {
-        perror("fopen /proc/self/status");
-        return 1;
-    }
+
+    size_t longitud = 0;
+    char  *contenido = proc_leer_completo("/proc/self/status", &longitud);
+    if (contenido == NULL) return 1;
 
     printf(COLOR_TITLE "--- Estado de Memoria del Shell (/proc/self/status) ---\n" COLOR_RESET);
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        /* Filtramos solo líneas de estadísticas de memoria interesantes */
-        if (strncmp(line, "VmPeak:", 7) == 0 ||    /* Pico de memoria virtual ocupada */
-            strncmp(line, "VmSize:", 7) == 0 ||    /* Memoria virtual total asignada */
-            strncmp(line, "VmLck:", 6) == 0 ||     /* Páginas bloqueadas físicamente en RAM (mlock) */
-            strncmp(line, "VmHWM:", 6) == 0 ||     /* Pico de memoria física residente (High Water Mark) */
-            strncmp(line, "VmRSS:", 6) == 0 ||     /* Memoria física residente (Resident Set Size) actualmente ocupada en RAM */
-            strncmp(line, "VmData:", 7) == 0 ||    /* Tamaño del segmento de datos (heap) */
-            strncmp(line, "VmStk:", 6) == 0 ||     /* Tamaño del segmento de pila (stack) */
-            strncmp(line, "VmExe:", 6) == 0 ||     /* Tamaño del segmento de código de texto */
-            strncmp(line, "VmLib:", 6) == 0 ||     /* Memoria asignada a librerías compartidas asociadas */
-            strncmp(line, "VmPTE:", 6) == 0) {     /* Tamaño que ocupan las tablas de páginas de traducción */
-            printf("  %s", line);
+
+    /* Troceado manual en lineas. Se usa memchr y no strchr para trabajar sobre
+     * una cantidad explicita de bytes: asi el recorrido es seguro incluso si el
+     * archivo contuviera un byte nulo intercalado. */
+    const char *inicio = contenido;
+    const char *fin    = contenido + longitud;
+
+    while (inicio < fin) {
+        const char *salto = memchr(inicio, '\n', (size_t)(fin - inicio));
+        size_t largo = salto ? (size_t)(salto - inicio) : (size_t)(fin - inicio);
+
+        if (es_linea_de_interes(inicio, largo)) {
+            /* %.*s imprime exactamente 'largo' bytes, sin depender de un '\0' */
+            printf("  %.*s\n", (int)largo, inicio);
         }
+
+        if (salto == NULL) break;
+        inicio = salto + 1;
     }
-    fclose(f);
+
     printf(COLOR_TITLE "--------------------------------------------------------\n" COLOR_RESET);
 
+    free(contenido);   /* sin fugas: el bufer se libera siempre */
     return 0;
 }
