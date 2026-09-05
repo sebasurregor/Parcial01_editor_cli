@@ -342,8 +342,8 @@ static int print_line(Editor *ed, size_t idx)
         perror("editor: lseek al imprimir");
         free(buf);
         return -1;
+        
     }
-
     ssize_t r = ed_read(ed, buf + plen, len);
     if (r == -1) {
         perror("editor: read al imprimir");
@@ -465,6 +465,108 @@ int editor_append(Editor *ed, const char *text)
     return 0;
 }
 
+
+/**
+ * COMANDO 'i <n> <texto>' -- anadir una linea en la posicion n.
+ *
+ * Syscalls: lseek(2) con SEEK_END, read(2), write(2).
+ *
+ * Se resuelven dos detalles que suelen pasarse por alto:
+ *
+ * 1) Si el archivo no esta vacio y su ultimo byte NO es '\n', hay que insertar
+ *    uno antes del texto nuevo; de lo contrario la linea anadida quedaria
+ *    pegada a la anterior. Para averiguarlo se lee ese ultimo byte con
+ *    lseek(fd, -1, SEEK_END) + read().
+ *
+ * 2) El salto previo, el texto y el '\n' final se arman en un unico bufer de
+ *    memoria dinamica y se emiten con UNA sola llamada a write(). Menos
+ *    cambios de contexto a modo kernel y menos riesgo de dejar el archivo a
+ *    medio escribir si algo falla en el intermedio.
+ *
+ * Alternativa considerada: abrir con O_APPEND haria innecesario el lseek final,
+ * pero se prefirio el lseek explicito porque hace visible el concepto de
+ * puntero de archivo, que es el objetivo pedagogico del taller.
+ */
+int editor_insert(Editor *ed, long n, const char *text)
+{
+    if (!require_open(ed)) return -1;
+
+    /* Si el archivo está vacío o se inserta tras la última línea, es lo mismo que el append */
+    if (ed->nlines == 0 || (size_t)n > ed->nlines) {
+        return editor_append(ed, text);
+    }
+
+    size_t tlen    = strlen(text);
+    size_t ins_len = tlen + 1; /* texto + '\n' */
+
+    off_t target_pos = ed->lines[n-1].start;
+
+    /*Construimos  el bufer que se va a insertar*/
+    char *ins_buf = malloc(ins_len);
+    if(ins_buf == NULL){
+        pererror("editor: malloc al insertar"); return -1;
+    }
+    memcpy(ins_buf, text, tlen);
+    ins_buf[tlen] = '\n';
+
+    /* Desplazamos la cola del archivo hacia la derecha*/
+    off_t bytes_to_move = ed->size - target_pos;
+    char buf[BUFSZ];
+
+    while (bytes_to_move > 0) {
+        size_t chunk = (bytes_to_move < (off_t)sizeof(buf)) 
+                       ? (size_t)bytes_to_move : sizeof(buf);
+
+        off_t read_pos = target_pos + bytes_to_move - chunk;
+        off_t write_pos = read_pos + ins_len;
+
+        if (ed_lseek(ed, read_pos, SEEK_SET, "SEEK_SET") == (off_t)-1) {
+            perror("editor: lseek de lectura al insertar");
+            free(ins_buf);
+            return -1;
+        }
+        ssize_t r = ed_read(ed, buf, chunk);
+        if (r == -1) { perror("editor: read al insertar"); free(ins_buf); return -1; }
+
+        if (ed_lseek(ed, write_pos, SEEK_SET, "SEEK_SET") == (off_t)-1) {
+            perror("editor: lseek de escritura al insertar");
+            free(ins_buf);
+            return -1;
+        }
+        if (ed_write(ed, buf, (size_t)r) == -1) {
+            perror("editor: write al insertar");
+            free(ins_buf);
+            return -1;
+        }
+
+        bytes_to_move -= chunk;
+    }
+
+
+    /*Escribimos la nueva linea en la posicion que liberamos*/
+    if (ed_lseek(ed, target_pos, SEEK_SET, "SEEK_SET") == (off_t)-1) {
+        perror("editor: lseek al escribir nueva linea");
+        free(ins_buf);
+        return -1;
+    }
+
+    if (ed_write(ed, ins_buf, ins_len) == -1) {
+        perror("editor: write nueva linea");
+        free(ins_buf);
+        return -1;
+    }
+
+    free(ins_buf);
+
+    if (index_build(ed) == -1) return -1;
+
+    printf(C_OK "Linea insertada en la posicion %ld" C_RESET C_INFO " (%zu bytes escritos, "
+           "tamano actual %lld bytes)\n" C_RESET,
+           n, ins_len, (long long)ed->size);
+
+    return 0;
+
+}
 /**
  * COMANDO 'd <n>' -- borrar la linea n.
  *
