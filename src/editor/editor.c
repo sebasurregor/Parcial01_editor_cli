@@ -703,6 +703,7 @@ static void editor_help(void)
     printf("  " C_PROMPT "o <archivo>" C_RESET "  Abre el archivo; si no existe lo crea.\n");
     printf("  " C_PROMPT "p [n]" C_RESET "        Imprime la linea n. Sin numero, todo el archivo.\n");
     printf("  " C_PROMPT "a <texto>" C_RESET "    Anade el texto como nueva linea al final.\n");
+    printf("  " C_PROMPT "ins <n> <texto>" C_RESET "   Inserta el texto en la linea n especificada.\n");
     printf("  " C_PROMPT "d <n>" C_RESET "        Borra la linea n.\n");
     printf("  " C_PROMPT "i" C_RESET "            Muestra el estado interno del editor.\n");
     printf("  " C_PROMPT "t" C_RESET "            Activa o desactiva la traza de syscalls.\n");
