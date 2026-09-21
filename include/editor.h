@@ -67,6 +67,13 @@ typedef struct {
     size_t  nlines;  /* cantidad de lineas realmente indexadas                 */
     size_t  cap;     /* capacidad reservada del arreglo (crece al doble)       */
     int     trace;   /* 1 = imprimir la traza de syscalls estilo strace        */
+
+    /* Portapapeles secuencial local (comandos 'y'/'x', reto de equipo de 3).
+     * Arreglo dinamico de lineas de texto copiadas con 'y', en el orden en
+     * que se copiaron. Cada entrada es una cadena propia en el heap. */
+    char  **clip;     /* arreglo dinamico de lineas copiadas -> free() c/u y el arreglo */
+    size_t  nclip;    /* cantidad de lineas actualmente en el portapapeles      */
+    size_t  clip_cap; /* capacidad reservada del arreglo (crece al doble)       */
 } Editor;
 
 /* ------------------------------------------------------------------------- */
@@ -88,6 +95,8 @@ int editor_search(Editor *ed, char *word);
 int  editor_append(Editor *ed, const char *text); /* comando 'a'                     */
 int editor_insert(Editor *ed, long n, const char *text);   /* comando 'i'                     */
 int  editor_delete(Editor *ed, long n);           /* comando 'd'                     */
+int  editor_yank(Editor *ed, long n);             /* comando 'y' (copia la linea n)  */
+int  editor_paste(Editor *ed, long n);            /* comando 'x' (pega antes de n)   */
 void editor_close(Editor *ed);                    /* comando 'q' (idempotente)       */
 
 #endif /* EDITOR_H */

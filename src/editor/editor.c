@@ -13,6 +13,8 @@
 #include <errno.h>      /* errno                                                  */
 #include <fcntl.h>      /* open, O_RDWR, O_CREAT                                  */
 #include <unistd.h>     /* read, write, lseek, ftruncate, close, STDOUT_FILENO    */
+#include <sys/stat.h>   /* fstat, struct stat: metadatos del inodo (comando 'm')  */
+#include <time.h>       /* localtime_r, strftime: formatear st_mtime              */
 
 /* ==========================================================================
  * Colores ANSI.
@@ -249,19 +251,56 @@ static int require_open(const Editor *ed)
     return 1;
 }
 
+/**
+ * Libera unicamente los recursos ligados al ARCHIVO actualmente abierto (el
+ * descriptor, el nombre y el indice de lineas). Deliberadamente NO toca el
+ * portapapeles ('clip'): lo usan tanto 'editor_close' (comando 'q', donde si
+ * se vacia el portapapeles) como 'editor_open' al reemplazar un archivo por
+ * otro. Si 'editor_open' vaciara el portapapeles, seria imposible copiar una
+ * linea de un archivo, abrir uno distinto con 'o' y pegarla alli con 'x' -
+ * justo el caso de uso mas natural de un portapapeles. Idempotente, igual
+ * que editor_close.
+ */
+static void close_file_resources(Editor *ed)
+{
+    if (ed->fd != -1) {
+        TRACE(ed, "close", "%d", ed->fd);
+        if (close(ed->fd) == -1) {
+            int saved = errno;
+            TRACE_ERR(ed);
+            errno = saved;
+            perror("editor: close");
+        } else {
+            TRACE_OK(ed, 0);
+        }
+        ed->fd = -1;
+    }
+
+    free(ed->path);            /* free(NULL) es seguro segun el estandar C */
+    free(ed->lines);
+    ed->path   = NULL;
+    ed->lines  = NULL;
+    ed->nlines = 0;
+    ed->cap    = 0;
+    ed->size   = 0;
+}
+
 /* ==========================================================================
  * SECCION 3: OPERACIONES DEL EDITOR
  * ========================================================================== */
 
 void editor_init(Editor *ed, int trace)
 {
-    ed->fd     = -1;
-    ed->path   = NULL;
-    ed->size   = 0;
-    ed->lines  = NULL;
-    ed->nlines = 0;
-    ed->cap    = 0;
-    ed->trace  = trace;
+    ed->fd       = -1;
+    ed->path     = NULL;
+    ed->size     = 0;
+    ed->lines    = NULL;
+    ed->nlines   = 0;
+    ed->cap      = 0;
+    ed->trace    = trace;
+    ed->clip     = NULL;
+    ed->nclip    = 0;
+    ed->clip_cap = 0;
 }
 
 /**
@@ -281,7 +320,7 @@ int editor_open(Editor *ed, const char *path)
     if (ed->fd != -1) {
         printf(C_INFO "Cerrando el archivo anterior ('%s') antes de abrir el nuevo...\n"
                C_RESET, ed->path);
-        editor_close(ed);
+        close_file_resources(ed);
     }
 
     char *copy = strdup(path);     /* memoria dinamica: se libera en editor_close */
@@ -306,7 +345,7 @@ int editor_open(Editor *ed, const char *path)
     ed->path = copy;
 
     if (index_build(ed) == -1) {   /* si el indexado falla, no dejamos el fd abierto */
-        editor_close(ed);
+        close_file_resources(ed);
         return -1;
     }
 
@@ -697,6 +736,133 @@ int editor_delete(Editor *ed, long n)
 }
 
 /**
+ * COMANDO 'y <n>' -- copiar (yank) la linea n al portapapeles.
+ *
+ * No introduce syscalls nuevas: reutiliza lseek(2)/read(2) exactamente igual
+ * que print_line(), solo que en vez de escribir a STDOUT guarda el resultado
+ * en un bufer propio del heap.
+ *
+ * DISENO: "portapapeles SECUENCIAL". Cada 'y' ANADE una copia al final del
+ * arreglo 'clip' (crece con la misma estrategia de duplicar capacidad que el
+ * indice de lineas), en vez de sobrescribir una unica ranura. Eso permite
+ * encadenar varias copias -- 'y 2', 'y 5', 'y 7' -- antes de pegarlas todas
+ * de una vez con 'x', conservando el orden en que se copiaron. Es la lectura
+ * mas literal de "portapapeles secuencial local" del enunciado, y ademas
+ * demuestra el mismo patron de buffer dinamico que ya exige 'i'.
+ */
+int editor_yank(Editor *ed, long n)
+{
+    if (!require_open(ed)) return -1;
+
+    if (ed->nlines == 0) {
+        fprintf(stderr, C_ERR "editor: el archivo esta vacio, no hay nada que copiar.\n" C_RESET);
+        return -1;
+    }
+    if (n < 1 || (size_t)n > ed->nlines) {
+        fprintf(stderr, C_ERR "editor: la linea %ld no existe "
+                        "(el archivo tiene %zu lineas).\n" C_RESET, n, ed->nlines);
+        return -1;
+    }
+
+    off_t  start = ed->lines[n - 1].start;
+    off_t  end   = ed->lines[n - 1].end;
+    size_t len   = (size_t)(end - start);
+
+    char *buf = malloc(len + 1);
+    if (buf == NULL) { perror("editor: malloc al copiar"); return -1; }
+
+    if (ed_lseek(ed, start, SEEK_SET, "SEEK_SET") == (off_t)-1) {
+        perror("editor: lseek al copiar");
+        free(buf);
+        return -1;
+    }
+    ssize_t r = ed_read(ed, buf, len);
+    if (r == -1) {
+        perror("editor: read al copiar");
+        free(buf);
+        return -1;
+    }
+
+    /* Se guarda SIN el '\n' final: 'editor_insert'/'editor_append' agregan
+     * su propio salto de linea, igual que si el texto viniera de 'a'/'i'. */
+    size_t rlen = (size_t)r;
+    if (rlen > 0 && buf[rlen - 1] == '\n') rlen--;
+    buf[rlen] = '\0';
+
+    if (ed->nclip == ed->clip_cap) {
+        size_t  ncap = (ed->clip_cap == 0) ? 8 : ed->clip_cap * 2;
+        char  **tmp  = realloc(ed->clip, ncap * sizeof(char *));
+        if (tmp == NULL) {
+            perror("editor: realloc del portapapeles");
+            free(buf);
+            return -1;
+        }
+        ed->clip     = tmp;
+        ed->clip_cap = ncap;
+    }
+    ed->clip[ed->nclip++] = buf;   /* 'buf' queda vivo en el portapapeles */
+
+    printf(C_OK "Linea %ld copiada al portapapeles" C_RESET C_INFO
+           " (%zu linea%s en cola)\n" C_RESET,
+           n, ed->nclip, ed->nclip == 1 ? "" : "s");
+    return 0;
+}
+
+/**
+ * COMANDO 'x <n>' -- pegar el portapapeles antes de la linea n.
+ *
+ * Inserta, EN ORDEN, todas las lineas que haya en el portapapeles, delegando
+ * en 'editor_insert' para cada una: se reutiliza integramente el desplazamiento
+ * de bytes de la seccion anterior en vez de duplicar esa logica. Tras pegar la
+ * linea i-esima en la posicion n+i, la siguiente se pega en n+i+1 para que el
+ * bloque completo quede contiguo y en el mismo orden en que se copio.
+ *
+ * ALTERNATIVA CONSIDERADA: dejar el portapapeles intacto tras pegar (como el
+ * portapapeles de un editor grafico, que persiste hasta la proxima copia). Se
+ * prefirio VACIARLO al pegar con exito: el enunciado lo describe como
+ * "Copiar y Pegar" -- una operacion de una sola vez, no un valor persistente
+ * -- y asi 'x x' repetido por error no duplica contenido sin que el usuario
+ * lo pida explicitamente. Si 'editor_insert' falla a medio camino (por un
+ * error real de E/S), las lineas ya pegadas se retiran del portapapeles pero
+ * las que faltan se conservan, para no perder trabajo del usuario.
+ */
+int editor_paste(Editor *ed, long n)
+{
+    if (!require_open(ed)) return -1;
+
+    if (ed->nclip == 0) {
+        fprintf(stderr, C_ERR "editor: el portapapeles esta vacio. "
+                        "Usa 'y <n>' para copiar una linea primero.\n" C_RESET);
+        return -1;
+    }
+
+    size_t total  = ed->nclip;
+    size_t pasted = 0;
+
+    for (pasted = 0; pasted < total; pasted++) {
+        if (editor_insert(ed, n + (long)pasted, ed->clip[pasted]) == -1)
+            break;   /* editor_insert ya reporto la causa con perror/TRACE_ERR */
+    }
+
+    for (size_t i = 0; i < pasted; i++) free(ed->clip[i]);
+
+    if (pasted == total) {
+        ed->nclip = 0;   /* 'clip_cap' se conserva: el heap se reutiliza en la proxima 'y' */
+        printf(C_OK "%zu linea%s pegada%s a partir de la linea %ld\n" C_RESET,
+               pasted, pasted == 1 ? "" : "s", pasted == 1 ? "" : "s", n);
+        return 0;
+    }
+
+    /* Solo se pego un prefijo: se retira del arreglo, el resto queda en cola. */
+    memmove(ed->clip, ed->clip + pasted, (total - pasted) * sizeof(char *));
+    ed->nclip = total - pasted;
+    fprintf(stderr, C_ERR "editor: solo se pegaron %zu de %zu lineas "
+                    "(quedan %zu en el portapapeles).\n" C_RESET,
+                    pasted, total, ed->nclip);
+    return -1;
+}
+
+/**
  * COMANDO 'q' -- cerrar y liberar.
  *
  * Syscall: close(2).
@@ -707,26 +873,19 @@ int editor_delete(Editor *ed, long n)
  */
 void editor_close(Editor *ed)
 {
-    if (ed->fd != -1) {
-        TRACE(ed, "close", "%d", ed->fd);
-        if (close(ed->fd) == -1) {
-            int saved = errno;
-            TRACE_ERR(ed);
-            errno = saved;
-            perror("editor: close");
-        } else {
-            TRACE_OK(ed, 0);
-        }
-        ed->fd = -1;
-    }
+    close_file_resources(ed);
 
-    free(ed->path);            /* free(NULL) es seguro segun el estandar C */
-    free(ed->lines);
-    ed->path   = NULL;
-    ed->lines  = NULL;
-    ed->nlines = 0;
-    ed->cap    = 0;
-    ed->size   = 0;
+    /* A diferencia de 'close_file_resources', esta SI es la salida real de la
+     * sesion (comando 'q' o Ctrl+D), asi que aqui se vacia tambien el
+     * portapapeles: ninguna cadena copiada con 'y' debe sobrevivir al cierre
+     * del editor. Idempotente: en una segunda llamada nclip ya es 0 y el
+     * bucle no itera. */
+    for (size_t i = 0; i < ed->nclip; i++)
+        free(ed->clip[i]);
+    free(ed->clip);
+    ed->clip     = NULL;
+    ed->nclip    = 0;
+    ed->clip_cap = 0;
 }
 
 /* ==========================================================================
@@ -742,11 +901,72 @@ static void editor_help(void)
     printf("  " C_PROMPT "a <texto>" C_RESET "    Anade el texto como nueva linea al final.\n");
     printf("  " C_PROMPT "i <n> <texto>" C_RESET "   Inserta el texto en la linea n especificada.\n");
     printf("  " C_PROMPT "d <n>" C_RESET "        Borra la linea n.\n");
-    printf("  " C_PROMPT "m" C_RESET "            Muestra el estado interno del editor.\n");
+    printf("  " C_PROMPT "y <n>" C_RESET "        Copia la linea n al portapapeles.\n");
+    printf("  " C_PROMPT "x <n>" C_RESET "        Pega el portapapeles antes de la linea n.\n");
+    printf("  " C_PROMPT "m" C_RESET "            Estado interno y metadatos del archivo (fstat).\n");
     printf("  " C_PROMPT "t" C_RESET "            Activa o desactiva la traza de syscalls.\n");
     printf("  " C_PROMPT "h" C_RESET "            Muestra esta ayuda.\n");
     printf("  " C_PROMPT "q" C_RESET "            Cierra el archivo y sale del editor.\n");
     printf(C_INFO "  (Ctrl+D equivale a 'q')\n\n" C_RESET);
+}
+
+/* Traduce los 9 bits de permiso de st_mode al formato "rwxr-xr-x" de ls -l.
+ * Solo dialogo por consola: no toca el archivo del usuario. */
+static void perm_to_str(mode_t mode, char out[10])
+{
+    const char *bits = "rwx";
+    for (int grp = 0; grp < 3; grp++) {          /* dueno, grupo, otros */
+        for (int b = 0; b < 3; b++) {
+            int shift = (2 - grp) * 3 + (2 - b);
+            out[grp * 3 + b] = (mode & (1 << shift)) ? bits[b] : '-';
+        }
+    }
+    out[9] = '\0';
+}
+
+/**
+ * COMANDO 'm' (parte 2) -- metadatos del archivo via fstat(2).
+ *
+ * A diferencia de open/read/write/lseek, que operan sobre el CONTENIDO del
+ * archivo, fstat(2) consulta el INODO: los metadatos que el sistema de
+ * archivos guarda aparte de los bytes (tamano real en disco, permisos,
+ * numero de inodo, fecha de la ultima modificacion...).
+ *
+ * Se usa fstat(fd, ...) y no stat(path, ...) a proposito: el editor ya tiene
+ * el descriptor abierto, asi que evita resolver la ruta una segunda vez y no
+ * sufre una condicion de carrera TOCTOU si el archivo fue renombrado o
+ * reemplazado entre el 'o' y el 'm' (fstat siempre consulta el inodo al que
+ * apunta el fd, sin importar el nombre que tenga ahora en el directorio).
+ */
+static int editor_metadata_print(const Editor *ed)
+{
+    struct stat st;
+
+    TRACE(ed, "fstat", "%d, &st", ed->fd);
+    if (fstat(ed->fd, &st) == -1) {
+        int saved = errno;
+        TRACE_ERR(ed);
+        errno = saved;
+        perror("editor: fstat");
+        return -1;
+    }
+    TRACE_OK(ed, 0);
+
+    char permisos[10];
+    perm_to_str(st.st_mode, permisos);
+
+    char fecha[32];
+    struct tm tmv;
+    localtime_r(&st.st_mtime, &tmv);
+    strftime(fecha, sizeof fecha, "%Y-%m-%d %H:%M:%S", &tmv);
+
+    printf(C_TITLE "--- Metadatos del archivo (fstat) ---\n" C_RESET);
+    printf("  Tamano en disco:     %lld bytes\n", (long long)st.st_size);
+    printf("  Permisos:            %o (%s)\n", (unsigned)(st.st_mode & 0777), permisos);
+    printf("  Inodo:               %llu\n", (unsigned long long)st.st_ino);
+    printf("  Ultima modificacion: %s\n", fecha);
+    printf(C_TITLE "--------------------------------------\n" C_RESET);
+    return 0;
 }
 
 static void editor_info(const Editor *ed)
@@ -761,8 +981,17 @@ static void editor_info(const Editor *ed)
         printf("  Lineas indexadas:   %zu\n", ed->nlines);
         printf("  Capacidad indice:   %zu (%zu bytes de heap)\n",
                ed->cap, ed->cap * sizeof(Line));
+        printf("  Portapapeles:       %zu linea%s en cola\n",
+               ed->nclip, ed->nclip == 1 ? "" : "s");
     }
     printf(C_TITLE "-------------------------\n" C_RESET);
+
+    /* El comando 'm' del enunciado pide especificamente tamano, permisos,
+     * inodo y fecha de modificacion via fstat(); se imprime como un segundo
+     * bloque en vez de reemplazar el estado interno de arriba, que ya tenia
+     * un uso pedagogico propio (fd, indice, heap) y esta cubierto por
+     * pruebas existentes. */
+    if (ed->fd != -1) editor_metadata_print(ed);
 }
 
 /* Convierte un texto a numero de linea validando que sea realmente un entero.
@@ -897,23 +1126,37 @@ int editor_repl(const char *path, int trace)
             editor_info(&ed);
             break;
 
-        case 'i':
+        case 'i': {
             char *endp;
             errno = 0;
 
-            /* Extract line number directly without parse_line_number */
+            /* Se extrae el numero de linea directamente con strtol, sin pasar
+             * por parse_line_number: aqui "sin argumento" no es un caso valido
+             * (a diferencia de 'p'), asi que basta validar endp == rest. */
             long line_num = strtol(rest, &endp, 10);
 
-            /* Check if a valid positive integer was provided */
             if (endp == rest || line_num <= 0 || errno == ERANGE) {
-                fprintf(stderr, C_ERR "Uso: k <n> <texto>  (n debe ser un entero positivo)\n" C_RESET);
+                fprintf(stderr, C_ERR "Uso: i <n> <texto>  (n debe ser un entero positivo)\n" C_RESET);
                 break;
             }
 
-            /* Skip whitespace between the line number and the text */
+            /* Salta el o los espacios entre el numero de linea y el texto */
             while (*endp == ' ' || *endp == '\t') endp++;
 
             editor_insert(&ed, line_num, endp);
+            break;
+        }
+
+        case 'y':
+            n = parse_line_number(rest, &ok);
+            if (!ok || n == 0) { fprintf(stderr, C_ERR "Uso: y <n>  (n debe ser un entero positivo)\n" C_RESET); break; }
+            editor_yank(&ed, n);
+            break;
+
+        case 'x':
+            n = parse_line_number(rest, &ok);
+            if (!ok || n == 0) { fprintf(stderr, C_ERR "Uso: x <n>  (n debe ser un entero positivo)\n" C_RESET); break; }
+            editor_paste(&ed, n);
             break;
 
         case 't':

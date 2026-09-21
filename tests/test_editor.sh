@@ -10,7 +10,7 @@
 #   Uso:  ./test_editor.sh
 # =====================================================================================
 
-EDITOR=../bin/editor
+EDITOR=./bin/editor
 DIR=pruebas_editor
 PASS=0
 FALLA=0
@@ -460,81 +460,6 @@ verificar "la inserción aumenta el archivo correctamente" \
 
 
 # ---------------------------------------------------------------------------------
-titulo "16. Búsqueda: coincidencias"
-# ---------------------------------------------------------------------------------
-
-printf 'hola mundo\nesta es una prueba\nhola de nuevo\nsin coincidencia\n' \
-       > $DIR/buscar.txt
-
-SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
-o pruebas_editor/buscar.txt
-s hola
-q
-EOF
-)
-
-verificar "buscar una cadena existente" "si" \
-          "$(echo "$SALIDA" | grep -q 'hola mundo' && echo si || echo no)"
-
-verificar "buscar encuentra otra coincidencia" "si" \
-          "$(echo "$SALIDA" | grep -q 'hola de nuevo' && echo si || echo no)"
-
-verificar "buscar no muestra líneas sin coincidencia" "no" \
-          "$(echo "$SALIDA" | grep -q 'sin coincidencia' && echo si || echo no)"
-
-
-# ---------------------------------------------------------------------------------
-titulo "17. Búsqueda: sin coincidencias"
-# ---------------------------------------------------------------------------------
-
-SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
-o pruebas_editor/buscar.txt
-s inexistente
-q
-EOF
-)
-
-verificar "buscar una cadena inexistente no imprime coincidencias" "no" \
-          "$(echo "$SALIDA" | grep -q 'hola mundo\|hola de nuevo' && echo si || echo no)"
-
-
-# ---------------------------------------------------------------------------------
-titulo "18. Búsqueda en archivo vacío"
-# ---------------------------------------------------------------------------------
-
-: > $DIR/buscar_vacio.txt
-
-SALIDA=$($EDITOR -q 2>&1 << 'EOF'
-o pruebas_editor/buscar_vacio.txt
-s hola
-q
-EOF
-)
-
-verificar "buscar en archivo vacío reporta que está vacío" "si" \
-          "$(echo "$SALIDA" | grep -qi 'vacio' && echo si || echo no)"
-
-
-# ---------------------------------------------------------------------------------
-titulo "19. Inserción mantiene correctamente el contenido después del desplazamiento"
-# ---------------------------------------------------------------------------------
-
-printf '111111\n222222\n333333\n444444\n' > $DIR/insertar_desplazamiento.txt
-
-$EDITOR -q > /dev/null 2>&1 << 'EOF'
-o pruebas_editor/insertar_desplazamiento.txt
-i 3 INSERTADA
-q
-EOF
-
-verificar "el contenido desplazado permanece intacto" \
-          "111111|222222|INSERTADA|333333|444444" \
-          "$(tr '\n' '|' < $DIR/insertar_desplazamiento.txt | sed 's/|$//')"
-
-verificar "la inserción aumenta el archivo correctamente" \
-          "5" "$(wc -l < $DIR/insertar_desplazamiento.txt)"
-
-# ---------------------------------------------------------------------------------
 titulo "20. Búsqueda: coincidencia como subcadena"
 # ---------------------------------------------------------------------------------
 
@@ -630,6 +555,139 @@ verificar "buscar no modifica el contenido del archivo" \
 verificar "el archivo conserva sus 3 líneas después de buscar" \
           "3" "$(wc -l < $DIR/buscar_inmutable.txt)"
 
+
+# ---------------------------------------------------------------------------------
+titulo "25. Metadatos del archivo (m / fstat)"
+# ---------------------------------------------------------------------------------
+
+printf 'A\nB\n' > $DIR/metadatos.txt
+chmod 644 $DIR/metadatos.txt 2>/dev/null
+
+SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
+o pruebas_editor/metadatos.txt
+m
+q
+EOF
+)
+
+verificar "'m' reporta el tamaño en disco" "si" \
+          "$(echo "$SALIDA" | grep -q "Tamano en disco:.*$(stat -c %s $DIR/metadatos.txt) bytes" && echo si || echo no)"
+verificar "'m' reporta el inodo real del archivo" "si" \
+          "$(echo "$SALIDA" | grep -q "Inodo:.*$(stat -c %i $DIR/metadatos.txt)" && echo si || echo no)"
+if soporta_permisos_posix; then
+    verificar "'m' reporta los permisos en octal" "si" \
+              "$(echo "$SALIDA" | grep -q 'Permisos:.*644' && echo si || echo no)"
+else
+    omitir "permisos octales de 'm': este sistema de archivos no los conserva."
+fi
+verificar "'m' reporta la fecha de última modificación" "si" \
+          "$(echo "$SALIDA" | grep -q 'Ultima modificacion:' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "26. Copiar y pegar dentro del mismo archivo"
+# ---------------------------------------------------------------------------------
+
+printf 'A\nB\nC\nD\n' > $DIR/copiar.txt
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/copiar.txt
+y 2
+x 4
+q
+EOF
+
+verificar "'y 2' + 'x 4' inserta una copia de B antes de la línea 4" \
+          "A|B|C|B|D" \
+          "$(tr '\n' '|' < $DIR/copiar.txt | sed 's/|$//')"
+
+
+# ---------------------------------------------------------------------------------
+titulo "27. Varias copias en secuencia conservan el orden al pegar"
+# ---------------------------------------------------------------------------------
+
+printf 'A\nB\nC\nD\n' > $DIR/copiar_varias.txt
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/copiar_varias.txt
+y 1
+y 3
+x 5
+q
+EOF
+
+verificar "'y 1', 'y 3' y 'x 5' pegan A y C en ese orden al final" \
+          "A|B|C|D|A|C" \
+          "$(tr '\n' '|' < $DIR/copiar_varias.txt | sed 's/|$//')"
+
+
+# ---------------------------------------------------------------------------------
+titulo "28. El portapapeles se vacía después de pegar"
+# ---------------------------------------------------------------------------------
+
+printf 'A\nB\n' > $DIR/portapapeles_vacio.txt
+SALIDA=$($EDITOR -q 2>&1 << 'EOF'
+o pruebas_editor/portapapeles_vacio.txt
+y 1
+x 3
+x 3
+q
+EOF
+)
+
+verificar "pegar dos veces sin volver a copiar falla la segunda vez" "si" \
+          "$(echo "$SALIDA" | grep -q 'portapapeles esta vacio' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "29. Copiar entre dos archivos distintos (el portapapeles sobrevive a 'o')"
+# ---------------------------------------------------------------------------------
+
+printf 'uno\ndos\ntres\n' > $DIR/origen.txt
+printf 'X\nY\n' > $DIR/destino.txt
+
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/origen.txt
+y 2
+o pruebas_editor/destino.txt
+x 1
+q
+EOF
+
+verificar "una línea copiada en un archivo se puede pegar en otro" \
+          "dos|X|Y" \
+          "$(tr '\n' '|' < $DIR/destino.txt | sed 's/|$//')"
+
+verificar "el archivo de origen no se modifica al copiar" \
+          "uno|dos|tres" \
+          "$(tr '\n' '|' < $DIR/origen.txt | sed 's/|$//')"
+
+
+# ---------------------------------------------------------------------------------
+titulo "30. Copiar: validación de errores"
+# ---------------------------------------------------------------------------------
+
+printf 'unica\n' > $DIR/copiar_error.txt
+SALIDA=$($EDITOR -q 2>&1 << 'EOF'
+o pruebas_editor/copiar_error.txt
+y 99
+x 0
+q
+EOF
+)
+
+verificar "copiar una línea fuera de rango da error" "si" \
+          "$(echo "$SALIDA" | grep -q 'linea 99 no existe' && echo si || echo no)"
+verificar "pegar en la línea 0 da error de uso" "si" \
+          "$(echo "$SALIDA" | grep -q 'Uso: x' && echo si || echo no)"
+
+: > $DIR/copiar_vacio.txt
+SALIDA=$($EDITOR -q 2>&1 << 'EOF'
+o pruebas_editor/copiar_vacio.txt
+y 1
+q
+EOF
+)
+verificar "copiar en un archivo vacío da error controlado" "si" \
+          "$(echo "$SALIDA" | grep -q 'esta vacio' && echo si || echo no)"
 
 
 # ---------------------------------------------------------------------------------

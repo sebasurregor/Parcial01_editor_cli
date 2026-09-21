@@ -1,11 +1,14 @@
 # Editor de Texto CLI en Unix + Shell Educativo de Syscalls
 
 **Universidad EAFIT — Sistemas Operativos (C2666-SI2004-4328)**
-Taller Práctico 01 · Equipo individual
+Taller Práctico 01 · Equipo de 3 integrantes
 
 Editor de texto interactivo operado por línea de comandos, escrito en C y
 apoyado exclusivamente en llamadas al sistema POSIX, integrado dentro del Shell
-Educativo de Syscalls estudiado en clase.
+Educativo de Syscalls estudiado en clase. Implementa, de forma acumulativa,
+los comandos base y los retos técnicos asignados a un equipo de tres personas:
+inserción arbitraria y búsqueda (reto de parejas) más metadatos vía `fstat()`
+y un portapapeles de copiar/pegar (reto de tres integrantes).
 
 ---
 
@@ -73,10 +76,14 @@ eafitOS> p_exec ./bin/editor documento.txt
 | `o <archivo>` | Abre el archivo; si no existe, lo crea con permisos 0644. | `open`, `lseek`, `read`, `close` |
 | `p [n]` | Imprime la línea n. Sin argumento, todo el archivo. | `lseek`, `read`, `write` (fd 1) |
 | `a <texto>` | Añade el texto como línea nueva al final. | `lseek`, `read`, `write` |
+| `i <n> <texto>` | Inserta el texto en la posición n, desplazando el resto. | `lseek`, `read`, `write` |
 | `d <n>` | Borra la línea n desplazando la cola y truncando. | `lseek`, `read`, `write`, `ftruncate` |
+| `s <palabra>` | Busca una palabra e imprime cada línea donde aparece. | `lseek`, `read`, `write` (fd 1) |
+| `y <n>` | Copia la línea n al portapapeles (se acumula, no reemplaza). | `lseek`, `read` |
+| `x <n>` | Pega el portapapeles completo, en orden, antes de la línea n. | `lseek`, `read`, `write` |
+| `m` | Estado interno del editor y metadatos del archivo (tamaño, permisos, inodo, última modificación). | `fstat` |
 | `q` | Cierra el descriptor, libera la memoria y sale. | `close` |
 | `h` | Muestra la ayuda. | — |
-| `i` | Muestra el estado interno (fd, tamaño, líneas, heap). | — |
 | `t` | Activa o desactiva la traza de llamadas al sistema. | — |
 
 `Ctrl+D` equivale a `q`.
@@ -85,7 +92,7 @@ eafitOS> p_exec ./bin/editor documento.txt
 
 ## Decisiones de diseño
 
-Las tres decisiones centrales, desarrolladas en detalle en el documento de
+Las decisiones centrales, desarrolladas en detalle en el documento de
 sustentación:
 
 **1. Categoría nueva `edicion` en el shell.** Las cuatro categorías existentes
@@ -105,6 +112,28 @@ pierde la función de deshacer.
 `shell.h`. El mismo objeto se enlaza en los dos binarios, lo que permite
 demostrar también la estrategia alternativa de integración (`p_exec`, con `fork`
 y `execvp`) sin código adicional.
+
+**4. `i` (insertar) y `x` (pegar) reutilizan el mismo mecanismo de dos fases
+de `d` (borrar):** desplazar la cola del archivo bloque a bloque con
+`lseek`/`read`/`write` y luego escribir en el hueco liberado. `x` no
+reimplementa el desplazamiento de bytes: llama a `editor_insert` una vez por
+cada línea del portapapeles, avanzando la posición de destino en cada
+llamada para conservar el orden.
+
+**5. `fstat(fd, ...)` en vez de `stat(path, ...)` para el comando `m`.** El
+editor ya tiene el descriptor abierto cuando se pide `m`, así que consultar
+el inodo a través del fd evita resolver la ruta una segunda vez y no sufre
+una condición de carrera TOCTOU si el archivo fue renombrado entre el `o` y
+el `m`: `fstat` siempre reporta el inodo al que apunta el descriptor, sin
+importar qué nombre tenga ahora en el directorio.
+
+**6. Portapapeles secuencial que sobrevive a `o` pero no a `q`.** `y`
+acumula copias (no reemplaza una única ranura), para poder copiar varias
+líneas antes de pegarlas juntas con `x`. El arreglo dinámico del
+portapapeles se libera únicamente al cerrar la sesión del editor
+(`editor_close`, comando `q`); al abrir un archivo distinto con `o` solo se
+cierra el descriptor anterior, deliberadamente sin tocar el portapapeles,
+para permitir copiar una línea de un archivo y pegarla en otro.
 
 ---
 
@@ -129,7 +158,7 @@ y `execvp`) sin código adicional.
 │       ├── cat_monitoreo.c     categoría monitoreo (sin cambios)
 │       └── cat_util.c          categoría utilidades (sin cambios)
 ├── tests/
-│   └── test_editor.sh          12 escenarios, 31 verificaciones
+│   └── test_editor.sh          30 escenarios, 66 verificaciones
 └── extras/
     ├── cloner.c                material de apoyo: hard links con link(2)
     └── file_manager.c          material de apoyo: CRUD con syscalls
@@ -143,7 +172,8 @@ Al compilar se generan dos carpetas adicionales, `bin/` con los ejecutables y
 ## Estado de la validación
 
 - Compila con `-Wall -Wextra` sin advertencias.
-- 31 de 31 pruebas automatizadas superadas.
+- 66 de 66 pruebas automatizadas superadas (1 omitida: bits de permiso POSIX
+  bajo root, ver más abajo).
 - Valgrind: 0 bytes en uso al salir, 0 errores.
 
 ### Nota para usuarios de WSL
