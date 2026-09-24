@@ -342,8 +342,8 @@ static int print_line(Editor *ed, size_t idx)
         perror("editor: lseek al imprimir");
         free(buf);
         return -1;
+        
     }
-
     ssize_t r = ed_read(ed, buf + plen, len);
     if (r == -1) {
         perror("editor: read al imprimir");
@@ -393,6 +393,57 @@ int editor_print(Editor *ed, long n)
 
     return 0;
 }
+
+int editor_search(Editor *ed, char *word)
+{
+    if (!require_open(ed)) return -1;
+
+    if (ed->nlines == 0) {
+        printf(C_INFO "(el archivo esta vacio)\n" C_RESET);
+        return 0;
+    }
+
+    for (size_t i = 0; i < ed->nlines; i++) {
+
+        off_t start = ed->lines[i].start;
+        off_t end   = ed->lines[i].end;
+
+        size_t len = (size_t)(end - start);
+
+        char *buf = malloc(len + 1);
+        if (buf == NULL) {
+            perror("editor: malloc al buscar");
+            return -1;
+        }
+
+        if (ed_lseek(ed, start, SEEK_SET, "SEEK_SET") == (off_t)-1) {
+            perror("editor: lseek al buscar");
+            free(buf);
+            return -1;
+        }
+
+        ssize_t r = ed_read(ed, buf, len);
+        if (r == -1) {
+            perror("editor: read al buscar");
+            free(buf);
+            return -1;
+        }
+
+        buf[r] = '\0';
+
+        if (strstr(buf, word) != NULL) {
+            if (print_line(ed, i) == -1) {
+                free(buf);
+                return -1;
+            }
+        }
+
+        free(buf);
+    }
+
+    return 0;
+}
+
 
 /**
  * COMANDO 'a <texto>' -- anadir una linea al final.
@@ -465,6 +516,93 @@ int editor_append(Editor *ed, const char *text)
     return 0;
 }
 
+
+/**
+ * COMANDO 'i <n> <texto>' -- anadir una linea en la posicion n.
+ *
+ * Syscalls: lseek(2) con SEEK_END, read(2), write(2).
+ *.
+ */
+int editor_insert(Editor *ed, long n, const char *text)
+{
+    if (!require_open(ed)) return -1;
+
+    /* Si el archivo está vacío o se inserta tras la última línea, es lo mismo que el append */
+    if (ed->nlines == 0 || (size_t)n > ed->nlines) {
+        return editor_append(ed, text);
+    }
+
+    size_t tlen    = strlen(text);
+    size_t ins_len = tlen + 1; /* texto + '\n' */
+
+    off_t target_pos = ed->lines[n-1].start;
+
+    /*Construimos  el bufer que se va a insertar*/
+    char *ins_buf = malloc(ins_len);
+    if(ins_buf == NULL){
+        perror("editor: malloc al insertar"); return -1;
+    }
+    memcpy(ins_buf, text, tlen);
+    ins_buf[tlen] = '\n';
+
+    /* Desplazamos la cola del archivo hacia la derecha*/
+    off_t bytes_to_move = ed->size - target_pos;
+    char buf[BUFSZ];
+
+    while (bytes_to_move > 0) {
+        size_t chunk = (bytes_to_move < (off_t)sizeof(buf)) 
+                       ? (size_t)bytes_to_move : sizeof(buf);
+
+        off_t read_pos = target_pos + bytes_to_move - chunk;
+        off_t write_pos = read_pos + ins_len;
+
+        if (ed_lseek(ed, read_pos, SEEK_SET, "SEEK_SET") == (off_t)-1) {
+            perror("editor: lseek de lectura al insertar");
+            free(ins_buf);
+            return -1;
+        }
+        ssize_t r = ed_read(ed, buf, chunk);
+        if (r == -1) { perror("editor: read al insertar"); free(ins_buf); return -1; }
+
+        if (ed_lseek(ed, write_pos, SEEK_SET, "SEEK_SET") == (off_t)-1) {
+            perror("editor: lseek de escritura al insertar");
+            free(ins_buf);
+            return -1;
+        }
+        if (ed_write(ed, buf, (size_t)r) == -1) {
+            perror("editor: write al insertar");
+            free(ins_buf);
+            return -1;
+        }
+
+        bytes_to_move -= chunk;
+    }
+
+
+    /*Escribimos la nueva linea en la posicion que liberamos*/
+    if (ed_lseek(ed, target_pos, SEEK_SET, "SEEK_SET") == (off_t)-1) {
+        perror("editor: lseek al escribir nueva linea");
+        free(ins_buf);
+        return -1;
+    }
+
+    if (ed_write(ed, ins_buf, ins_len) == -1) {
+        perror("editor: write nueva linea");
+        free(ins_buf);
+        return -1;
+    }
+
+    free(ins_buf);
+
+    if (index_build(ed) == -1) return -1;
+
+    printf(C_OK "Linea insertada en la posicion %ld" C_RESET C_INFO " (%zu bytes escritos, "
+           "tamano actual %lld bytes)\n" C_RESET,
+           n, ins_len, (long long)ed->size);
+
+    return 0;
+
+}
 /**
  * COMANDO 'd <n>' -- borrar la linea n.
  *
@@ -600,9 +738,11 @@ static void editor_help(void)
     printf(C_TITLE "\n--- Editor de texto CLI (comandos) ---\n" C_RESET);
     printf("  " C_PROMPT "o <archivo>" C_RESET "  Abre el archivo; si no existe lo crea.\n");
     printf("  " C_PROMPT "p [n]" C_RESET "        Imprime la linea n. Sin numero, todo el archivo.\n");
+    printf("  " C_PROMPT "s [palabra]" C_RESET "  Busca una palabra dentro del archivo.\n");
     printf("  " C_PROMPT "a <texto>" C_RESET "    Anade el texto como nueva linea al final.\n");
+    printf("  " C_PROMPT "i <n> <texto>" C_RESET "   Inserta el texto en la linea n especificada.\n");
     printf("  " C_PROMPT "d <n>" C_RESET "        Borra la linea n.\n");
-    printf("  " C_PROMPT "i" C_RESET "            Muestra el estado interno del editor.\n");
+    printf("  " C_PROMPT "m" C_RESET "            Muestra el estado interno del editor.\n");
     printf("  " C_PROMPT "t" C_RESET "            Activa o desactiva la traza de syscalls.\n");
     printf("  " C_PROMPT "h" C_RESET "            Muestra esta ayuda.\n");
     printf("  " C_PROMPT "q" C_RESET "            Cierra el archivo y sale del editor.\n");
@@ -729,6 +869,17 @@ int editor_repl(const char *path, int trace)
             editor_print(&ed, n);
             break;
 
+        case 's':
+            rest = trim(rest);
+
+            if (*rest == '\0') {
+                fprintf(stderr, C_ERR "Uso: s <palabra>\n" C_RESET);
+                break;
+            }
+
+    editor_search(&ed, rest);
+    break;
+        
         case 'a':
             /* Se salta UN solo espacio separador; el resto del texto se toma de
              * forma literal para no perder la indentacion que escriba el usuario. */
@@ -742,8 +893,27 @@ int editor_repl(const char *path, int trace)
             editor_delete(&ed, n);
             break;
 
-        case 'i':
+        case 'm':
             editor_info(&ed);
+            break;
+
+        case 'i':
+            char *endp;
+            errno = 0;
+
+            /* Extract line number directly without parse_line_number */
+            long line_num = strtol(rest, &endp, 10);
+
+            /* Check if a valid positive integer was provided */
+            if (endp == rest || line_num <= 0 || errno == ERANGE) {
+                fprintf(stderr, C_ERR "Uso: k <n> <texto>  (n debe ser un entero positivo)\n" C_RESET);
+                break;
+            }
+
+            /* Skip whitespace between the line number and the text */
+            while (*endp == ' ' || *endp == '\t') endp++;
+
+            editor_insert(&ed, line_num, endp);
             break;
 
         case 't':

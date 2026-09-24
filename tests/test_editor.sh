@@ -10,7 +10,7 @@
 #   Uso:  ./test_editor.sh
 # =====================================================================================
 
-EDITOR=./bin/editor
+EDITOR=../bin/editor
 DIR=pruebas_editor
 PASS=0
 FALLA=0
@@ -280,7 +280,7 @@ SALIDA=$($EDITOR -q 2>&1 << 'EOF'
 o pruebas_editor/uno.txt
 o pruebas_editor/borrar.txt
 o pruebas_editor/texto.txt
-i
+m
 q
 EOF
 )
@@ -308,6 +308,329 @@ titulo "12. Salida por Ctrl+D (EOF) en lugar de 'q'"
 # ---------------------------------------------------------------------------------
 printf 'o pruebas_editor/uno.txt\na desde EOF\n' | $EDITOR -q > /dev/null 2>&1
 verificar "EOF cierra el editor guardando los cambios" "4" "$(wc -l < $DIR/uno.txt)"
+
+# ---------------------------------------------------------------------------------
+titulo "13. Inserción de líneas: inicio, intermedia y final"
+# ---------------------------------------------------------------------------------
+
+# Inserción al inicio
+printf 'A\nB\nC\n' > $DIR/insertar.txt
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/insertar.txt
+i 1 NUEVA
+q
+EOF
+
+verificar "insertar al INICIO" "NUEVA|A|B|C" \
+          "$(tr '\n' '|' < $DIR/insertar.txt | sed 's/|$//')"
+
+# Inserción en posición intermedia
+printf 'A\nB\nC\n' > $DIR/insertar.txt
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/insertar.txt
+i 2 NUEVA
+q
+EOF
+
+verificar "insertar en posición INTERMEDIA" "A|NUEVA|B|C" \
+          "$(tr '\n' '|' < $DIR/insertar.txt | sed 's/|$//')"
+
+# Inserción después de la última línea -> append
+printf 'A\nB\nC\n' > $DIR/insertar.txt
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/insertar.txt
+i 4 NUEVA
+q
+EOF
+
+verificar "insertar después de la ÚLTIMA línea" "A|B|C|NUEVA" \
+          "$(tr '\n' '|' < $DIR/insertar.txt | sed 's/|$//')"
+
+
+# ---------------------------------------------------------------------------------
+titulo "14. Inserción en archivo vacío"
+# ---------------------------------------------------------------------------------
+
+: > $DIR/insertar_vacio.txt
+
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/insertar_vacio.txt
+i 1 primera
+q
+EOF
+
+verificar "insertar en archivo vacío" "primera" \
+          "$(cat $DIR/insertar_vacio.txt)"
+
+verificar "archivo vacío queda con 1 línea" "1" \
+          "$(wc -l < $DIR/insertar_vacio.txt)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "15. Inserción de varias líneas conserva el orden"
+# ---------------------------------------------------------------------------------
+
+printf 'A\nB\nC\nD\n' > $DIR/insertar_orden.txt
+
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/insertar_orden.txt
+i 2 X
+i 4 Y
+q
+EOF
+
+verificar "las inserciones conservan el orden" "A|X|B|Y|C|D" \
+          "$(tr '\n' '|' < $DIR/insertar_orden.txt | sed 's/|$//')"
+
+
+# ---------------------------------------------------------------------------------
+titulo "16. Búsqueda: coincidencias"
+# ---------------------------------------------------------------------------------
+
+printf 'hola mundo\nesta es una prueba\nhola de nuevo\nsin coincidencia\n' \
+       > $DIR/buscar.txt
+
+SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
+o pruebas_editor/buscar.txt
+s hola
+q
+EOF
+)
+
+verificar "buscar una cadena existente" "si" \
+          "$(echo "$SALIDA" | grep -q 'hola mundo' && echo si || echo no)"
+
+verificar "buscar encuentra otra coincidencia" "si" \
+          "$(echo "$SALIDA" | grep -q 'hola de nuevo' && echo si || echo no)"
+
+verificar "buscar no muestra líneas sin coincidencia" "no" \
+          "$(echo "$SALIDA" | grep -q 'sin coincidencia' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "17. Búsqueda: sin coincidencias"
+# ---------------------------------------------------------------------------------
+
+SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
+o pruebas_editor/buscar.txt
+s inexistente
+q
+EOF
+)
+
+verificar "buscar una cadena inexistente no imprime coincidencias" "no" \
+          "$(echo "$SALIDA" | grep -q 'hola mundo\|hola de nuevo' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "18. Búsqueda en archivo vacío"
+# ---------------------------------------------------------------------------------
+
+: > $DIR/buscar_vacio.txt
+
+SALIDA=$($EDITOR -q 2>&1 << 'EOF'
+o pruebas_editor/buscar_vacio.txt
+s hola
+q
+EOF
+)
+
+verificar "buscar en archivo vacío reporta que está vacío" "si" \
+          "$(echo "$SALIDA" | grep -qi 'vacio' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "19. Inserción mantiene correctamente el contenido después del desplazamiento"
+# ---------------------------------------------------------------------------------
+
+printf '111111\n222222\n333333\n444444\n' > $DIR/insertar_desplazamiento.txt
+
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/insertar_desplazamiento.txt
+i 3 INSERTADA
+q
+EOF
+
+verificar "el contenido desplazado permanece intacto" \
+          "111111|222222|INSERTADA|333333|444444" \
+          "$(tr '\n' '|' < $DIR/insertar_desplazamiento.txt | sed 's/|$//')"
+
+verificar "la inserción aumenta el archivo correctamente" \
+          "5" "$(wc -l < $DIR/insertar_desplazamiento.txt)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "16. Búsqueda: coincidencias"
+# ---------------------------------------------------------------------------------
+
+printf 'hola mundo\nesta es una prueba\nhola de nuevo\nsin coincidencia\n' \
+       > $DIR/buscar.txt
+
+SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
+o pruebas_editor/buscar.txt
+s hola
+q
+EOF
+)
+
+verificar "buscar una cadena existente" "si" \
+          "$(echo "$SALIDA" | grep -q 'hola mundo' && echo si || echo no)"
+
+verificar "buscar encuentra otra coincidencia" "si" \
+          "$(echo "$SALIDA" | grep -q 'hola de nuevo' && echo si || echo no)"
+
+verificar "buscar no muestra líneas sin coincidencia" "no" \
+          "$(echo "$SALIDA" | grep -q 'sin coincidencia' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "17. Búsqueda: sin coincidencias"
+# ---------------------------------------------------------------------------------
+
+SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
+o pruebas_editor/buscar.txt
+s inexistente
+q
+EOF
+)
+
+verificar "buscar una cadena inexistente no imprime coincidencias" "no" \
+          "$(echo "$SALIDA" | grep -q 'hola mundo\|hola de nuevo' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "18. Búsqueda en archivo vacío"
+# ---------------------------------------------------------------------------------
+
+: > $DIR/buscar_vacio.txt
+
+SALIDA=$($EDITOR -q 2>&1 << 'EOF'
+o pruebas_editor/buscar_vacio.txt
+s hola
+q
+EOF
+)
+
+verificar "buscar en archivo vacío reporta que está vacío" "si" \
+          "$(echo "$SALIDA" | grep -qi 'vacio' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "19. Inserción mantiene correctamente el contenido después del desplazamiento"
+# ---------------------------------------------------------------------------------
+
+printf '111111\n222222\n333333\n444444\n' > $DIR/insertar_desplazamiento.txt
+
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/insertar_desplazamiento.txt
+i 3 INSERTADA
+q
+EOF
+
+verificar "el contenido desplazado permanece intacto" \
+          "111111|222222|INSERTADA|333333|444444" \
+          "$(tr '\n' '|' < $DIR/insertar_desplazamiento.txt | sed 's/|$//')"
+
+verificar "la inserción aumenta el archivo correctamente" \
+          "5" "$(wc -l < $DIR/insertar_desplazamiento.txt)"
+
+# ---------------------------------------------------------------------------------
+titulo "20. Búsqueda: coincidencia como subcadena"
+# ---------------------------------------------------------------------------------
+
+printf 'computadora\nprogramacion\ncomputacion\n' > $DIR/buscar_subcadena.txt
+
+SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
+o pruebas_editor/buscar_subcadena.txt
+s puta
+q
+EOF
+)
+
+verificar "buscar una subcadena encuentra la línea correspondiente" "si" \
+          "$(echo "$SALIDA" | grep -q 'computadora' && echo si || echo no)"
+
+verificar "buscar una subcadena no imprime líneas sin coincidencia" "no" \
+          "$(echo "$SALIDA" | grep -q 'programacion' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "21. Búsqueda: varias coincidencias en una misma línea"
+# ---------------------------------------------------------------------------------
+
+printf 'hola hola mundo\notra linea\n' > $DIR/buscar_repetida.txt
+
+SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
+o pruebas_editor/buscar_repetida.txt
+s hola
+q
+EOF
+)
+
+verificar "una línea con varias apariciones se imprime una sola vez" "1" \
+          "$(echo "$SALIDA" | grep -c 'hola hola mundo')"
+
+verificar "las líneas sin coincidencia siguen sin imprimirse" "no" \
+          "$(echo "$SALIDA" | grep -q 'otra linea' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "22. Búsqueda: coincidencia en primera y última línea"
+# ---------------------------------------------------------------------------------
+
+printf 'buscar aquí\nlinea intermedia\nbuscar también aquí\n' > $DIR/buscar_extremos.txt
+
+SALIDA=$($EDITOR -q 2>/dev/null << 'EOF'
+o pruebas_editor/buscar_extremos.txt
+s buscar
+q
+EOF
+)
+
+verificar "buscar encuentra la primera línea" "si" \
+          "$(echo "$SALIDA" | grep -q 'buscar aquí' && echo si || echo no)"
+
+verificar "buscar encuentra la última línea" "si" \
+          "$(echo "$SALIDA" | grep -q 'buscar también aquí' && echo si || echo no)"
+
+verificar "buscar no imprime la línea intermedia" "no" \
+          "$(echo "$SALIDA" | grep -q 'linea intermedia' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "23. Búsqueda: operar sin archivo abierto"
+# ---------------------------------------------------------------------------------
+
+SALIDA=$($EDITOR -q 2>&1 << 'EOF'
+s hola
+q
+EOF
+)
+
+verificar "buscar sin archivo abierto da error controlado" "si" \
+          "$(echo "$SALIDA" | grep -q 'no hay ningun archivo abierto' && echo si || echo no)"
+
+
+# ---------------------------------------------------------------------------------
+titulo "24. Búsqueda: el archivo no se modifica"
+# ---------------------------------------------------------------------------------
+
+printf 'alpha beta\ngamma delta\nbeta gamma\n' > $DIR/buscar_inmutable.txt
+ORIG=$(cat $DIR/buscar_inmutable.txt)
+
+$EDITOR -q > /dev/null 2>&1 << 'EOF'
+o pruebas_editor/buscar_inmutable.txt
+s beta
+q
+EOF
+
+verificar "buscar no modifica el contenido del archivo" \
+          "$ORIG" "$(cat $DIR/buscar_inmutable.txt)"
+
+verificar "el archivo conserva sus 3 líneas después de buscar" \
+          "3" "$(wc -l < $DIR/buscar_inmutable.txt)"
+
+
 
 # ---------------------------------------------------------------------------------
 titulo "RESUMEN"

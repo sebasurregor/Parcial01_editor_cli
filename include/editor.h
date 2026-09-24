@@ -84,7 +84,9 @@ int editor_repl(const char *path, int trace);
 void editor_init(Editor *ed, int trace);          /* deja el estado en limpio        */
 int  editor_open(Editor *ed, const char *path);   /* comando 'o'                     */
 int  editor_print(Editor *ed, long n);            /* comando 'p' (n<=0 => todo)      */
+int editor_search(Editor *ed, char *word);
 int  editor_append(Editor *ed, const char *text); /* comando 'a'                     */
+int editor_insert(Editor *ed, long n, const char *text);   /* comando 'i'                     */
 int  editor_delete(Editor *ed, long n);           /* comando 'd'                     */
 void editor_close(Editor *ed);                    /* comando 'q' (idempotente)       */
 
